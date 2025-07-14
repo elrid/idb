@@ -226,15 +226,12 @@ message ScreenshotResponse {
   string image_format = 2;
 }
 
-message GetMainScreenIOSurfaceRequest {}
+message GetMainScreenIOSurfaceRequest {
+  string xpc_service = 1;
+}
 
 message GetMainScreenIOSurfaceResponse {
-  uint32 surface_id = 1;
-  uint64 width = 2;
-  uint64 height = 3;
-  uint32 bytes_per_row = 4;
-  uint32 bytes_per_element = 5;
-  uint32 pixel_format = 6;
+  string status = 1;
 }
 
 message FocusRequest {}

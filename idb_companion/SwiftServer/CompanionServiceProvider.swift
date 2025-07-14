@@ -10,9 +10,13 @@ import Foundation
 import GRPC
 import IDBCompanionUtilities
 import IDBGRPCSwift
+import IOSurface
 import NIOHPACK
 import SwiftProtobuf
 import XCTestBootstrap
+
+// XPC imports
+import Darwin
 
 final class CompanionServiceProvider: Idb_CompanionServiceAsyncProvider {
 
@@ -253,37 +257,80 @@ final class CompanionServiceProvider: Idb_CompanionServiceAsyncProvider {
   func get_main_screen_iosurface(request: Idb_GetMainScreenIOSurfaceRequest, context: GRPCAsyncServerCallContext) async throws -> Idb_GetMainScreenIOSurfaceResponse {
     return try await FBTeardownContext.withAutocleanup {
       do {
-        let surfaceInfo = try await BridgeFuture.value(commandExecutor.get_main_screen_iosurface())
-        guard let surfaceDict = surfaceInfo as? [String: Any] else {
-          throw GRPCStatus(code: .internalError, message: "Invalid surface info format")
+        // Get the IOSurface object from the command executor
+        let surface = try await BridgeFuture.value(commandExecutor.get_main_screen_iosurface())
+        
+        // Validate the XPC service parameter
+        guard !request.xpcService.isEmpty else {
+          throw GRPCStatus(code: .invalidArgument, message: "XPC service name is required")
         }
         
-        // Extract and validate surface properties
-        guard let surfaceID = (surfaceDict["surface_id"] as? NSNumber)?.uint32Value,
-              let width = (surfaceDict["width"] as? NSNumber)?.uint64Value,
-              let height = (surfaceDict["height"] as? NSNumber)?.uint64Value,
-              let bytesPerRow = (surfaceDict["bytes_per_row"] as? NSNumber)?.uint32Value,
-              let bytesPerElement = (surfaceDict["bytes_per_element"] as? NSNumber)?.uint32Value,
-              let pixelFormat = (surfaceDict["pixel_format"] as? NSNumber)?.uint32Value else {
-          throw GRPCStatus(code: .internalError, message: "Missing or invalid surface properties")
-        }
-        
-        // Additional validation
-        if surfaceID == 0 {
-          throw GRPCStatus(code: .internalError, message: "Invalid surface ID: 0")
-        }
-        
-        if width == 0 || height == 0 {
-          throw GRPCStatus(code: .internalError, message: "Invalid surface dimensions: width=\(width), height=\(height)")
+        // Send the IOSurface via XPC
+        let result = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+          let serviceNameCString = request.xpcService.cString(using: .utf8)!
+          
+          // Create XPC connection
+          let connection = xpc_connection_create_mach_service(serviceNameCString, nil, 0)
+          
+          // Use a flag to ensure continuation is only resumed once
+          var continuationResumed = false
+          
+          xpc_connection_set_event_handler(connection) { event in
+            // Handle connection errors only if continuation hasn't been resumed yet
+            if xpc_get_type(event) == XPC_TYPE_ERROR && !continuationResumed {
+              continuationResumed = true
+              let errorDescription = "XPC connection error"
+              continuation.resume(throwing: GRPCStatus(code: .internalError, message: errorDescription))
+              return
+            }
+          }
+          
+          xpc_connection_resume(connection)
+          
+          // Create XPC object from IOSurface
+          let surfaceRef = Unmanaged.passUnretained(surface).toOpaque()
+          let ioSurfaceRef = unsafeBitCast(surfaceRef, to: IOSurfaceRef.self)
+          let xpcObject = IOSurfaceCreateXPCObject(ioSurfaceRef)
+          
+          guard xpcObject != nil else {
+            if !continuationResumed {
+              continuationResumed = true
+              continuation.resume(throwing: GRPCStatus(code: .internalError, message: "Failed to create XPC object from IOSurface"))
+            }
+            return
+          }
+          
+          // Create message dictionary
+          let message = xpc_dictionary_create(nil, nil, 0)
+          xpc_dictionary_set_string(message, "cmd", "sendSurface")
+          xpc_dictionary_set_value(message, "surf", xpcObject)
+          
+          // Send message with reply
+          xpc_connection_send_message_with_reply(connection, message, DispatchQueue.main) { reply in
+            defer {
+              xpc_connection_cancel(connection)
+            }
+            
+            // Only resume continuation if it hasn't been resumed yet
+            guard !continuationResumed else { return }
+            continuationResumed = true
+            
+            if xpc_get_type(reply) == XPC_TYPE_ERROR {
+              let errorDescription = "XPC reply error"
+              continuation.resume(throwing: GRPCStatus(code: .internalError, message: errorDescription))
+              return
+            }
+            
+            // Get status from reply
+            let status = xpc_dictionary_get_string(reply, "status")
+            let statusString = status != nil ? String(cString: status!) : "no status"
+            
+            continuation.resume(returning: statusString)
+          }
         }
         
         return .with {
-          $0.surfaceID = surfaceID
-          $0.width = width
-          $0.height = height
-          $0.bytesPerRow = bytesPerRow
-          $0.bytesPerElement = bytesPerElement
-          $0.pixelFormat = pixelFormat
+          $0.status = result
         }
       } catch {
         // Map specific error types to appropriate gRPC status codes

@@ -6,6 +6,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <IOSurface/IOSurfaceObjC.h>
 
 #import <FBControlCore/FBControlCore.h>
 
@@ -179,7 +180,7 @@ extern FBFileContainerKind const FBFileContainerKindFramework;
 
  @return A Future, wrapping an NSDictionary with IOSurface properties.
  */
-- (FBFuture<NSDictionary<NSString *, id> *> *)get_main_screen_iosurface;
+- (FBFuture<IOSurface *> *)get_main_screen_iosurface;
 
 /**
  Returns the accessibility info of a point on the screen

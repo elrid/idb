@@ -11,6 +11,7 @@
 #import <FBDeviceControl/FBDeviceControl.h>
 #import <IOSurface/IOSurfaceObjC.h>
 #import <IOSurface/IOSurface.h>
+#import <xpc/xpc.h>
 
 @interface FBSimpleFramebufferConsumer : NSObject <FBFramebufferConsumer>
 @property (nonatomic, copy) void (^surfaceHandler)(IOSurface *surface);
@@ -179,7 +180,7 @@ FBFileContainerKind const FBFileContainerKindFramework = @"framework";
     }];
 }
 
-- (FBFuture<NSDictionary<NSString *, id> *> *)get_main_screen_iosurface
+- (FBFuture<IOSurface *> *)get_main_screen_iosurface
 {
   // Validate target type
   if (![self.target isKindOfClass:[FBSimulator class]]) {
@@ -194,13 +195,6 @@ FBFileContainerKind const FBFileContainerKindFramework = @"framework";
   if (simulator.state != FBiOSTargetStateBooted) {
     return [[FBIDBError
       describeFormat:@"Simulator must be booted to access IOSurface, current state: %@", simulator.stateString]
-      failFuture];
-  }
-  
-  // Check if target supports framebuffer
-  if (![simulator respondsToSelector:@selector(connectToFramebuffer)]) {
-    return [[FBIDBError
-      describeFormat:@"Simulator %@ doesn't support framebuffer access", simulator]
       failFuture];
   }
   
@@ -289,39 +283,8 @@ FBFileContainerKind const FBFileContainerKindFramework = @"framework";
           failFuture];
       }
       
-      // Validate other surface properties
-      size_t bytesPerRow = [capturedSurface bytesPerRow];
-      size_t bytesPerElement = [capturedSurface bytesPerElement];
-      uint32_t pixelFormat = [capturedSurface pixelFormat];
-      
-      if (bytesPerRow == 0) {
-        return [[FBIDBError
-          describe:@"Invalid IOSurface bytes per row: 0"]
-          failFuture];
-      }
-      
-      if (bytesPerElement == 0) {
-        return [[FBIDBError
-          describe:@"Invalid IOSurface bytes per element: 0"]
-          failFuture];
-      }
-      
-      if (pixelFormat == 0) {
-        return [[FBIDBError
-          describe:@"Invalid IOSurface pixel format: 0"]
-          failFuture];
-      }
-      
-      NSDictionary<NSString *, id> *surfaceInfo = @{
-        @"surface_id": @(surfaceID),
-        @"width": @([capturedSurface width]),
-        @"height": @([capturedSurface height]),
-        @"bytes_per_row": @(bytesPerRow),
-        @"bytes_per_element": @(bytesPerElement),
-        @"pixel_format": @(pixelFormat)
-      };
-      
-      return [FBFuture futureWithResult:surfaceInfo];
+      // Return the IOSurface object directly
+      return [FBFuture futureWithResult:capturedSurface];
     }];
 }
 
