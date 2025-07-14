@@ -146,6 +146,10 @@ final class CompanionServiceInterceptors: Idb_CompanionServiceServerInterceptorF
     commonInterceptors()
   }
 
+  func makeget_main_screen_iosurfaceInterceptors() -> [ServerInterceptor<Idb_GetMainScreenIOSurfaceRequest, Idb_GetMainScreenIOSurfaceResponse>] {
+    commonInterceptors()
+  }
+
   func makevideo_streamInterceptors() -> [ServerInterceptor<Idb_VideoStreamRequest, Idb_VideoStreamResponse>] {
     commonInterceptors()
   }

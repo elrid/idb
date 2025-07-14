@@ -175,6 +175,13 @@ extern FBFileContainerKind const FBFileContainerKindFramework;
 - (FBFuture<NSData *> *)take_screenshot:(FBScreenshotFormat)format;
 
 /**
+ Gets the main screen IOSurface information
+
+ @return A Future, wrapping an NSDictionary with IOSurface properties.
+ */
+- (FBFuture<NSDictionary<NSString *, id> *> *)get_main_screen_iosurface;
+
+/**
  Returns the accessibility info of a point on the screen
 
  @param point location on the screen (NSValue<NSPoint> *), returns info for the whole screen if nil

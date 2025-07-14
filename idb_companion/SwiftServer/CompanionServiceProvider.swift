@@ -250,6 +250,67 @@ final class CompanionServiceProvider: Idb_CompanionServiceAsyncProvider {
     }
   }
 
+  func get_main_screen_iosurface(request: Idb_GetMainScreenIOSurfaceRequest, context: GRPCAsyncServerCallContext) async throws -> Idb_GetMainScreenIOSurfaceResponse {
+    return try await FBTeardownContext.withAutocleanup {
+      do {
+        let surfaceInfo = try await BridgeFuture.value(commandExecutor.get_main_screen_iosurface())
+        guard let surfaceDict = surfaceInfo as? [String: Any] else {
+          throw GRPCStatus(code: .internalError, message: "Invalid surface info format")
+        }
+        
+        // Extract and validate surface properties
+        guard let surfaceID = (surfaceDict["surface_id"] as? NSNumber)?.uint32Value,
+              let width = (surfaceDict["width"] as? NSNumber)?.uint64Value,
+              let height = (surfaceDict["height"] as? NSNumber)?.uint64Value,
+              let bytesPerRow = (surfaceDict["bytes_per_row"] as? NSNumber)?.uint32Value,
+              let bytesPerElement = (surfaceDict["bytes_per_element"] as? NSNumber)?.uint32Value,
+              let pixelFormat = (surfaceDict["pixel_format"] as? NSNumber)?.uint32Value else {
+          throw GRPCStatus(code: .internalError, message: "Missing or invalid surface properties")
+        }
+        
+        // Additional validation
+        if surfaceID == 0 {
+          throw GRPCStatus(code: .internalError, message: "Invalid surface ID: 0")
+        }
+        
+        if width == 0 || height == 0 {
+          throw GRPCStatus(code: .internalError, message: "Invalid surface dimensions: width=\(width), height=\(height)")
+        }
+        
+        return .with {
+          $0.surfaceID = surfaceID
+          $0.width = width
+          $0.height = height
+          $0.bytesPerRow = bytesPerRow
+          $0.bytesPerElement = bytesPerElement
+          $0.pixelFormat = pixelFormat
+        }
+      } catch {
+        // Map specific error types to appropriate gRPC status codes
+        let errorMessage = error.localizedDescription
+        
+        if errorMessage.contains("only supported for simulator targets") {
+          throw GRPCStatus(code: .unimplemented, message: "IOSurface access is only supported for simulator targets")
+        } else if errorMessage.contains("must be booted") {
+          throw GRPCStatus(code: .failedPrecondition, message: "Simulator must be booted to access IOSurface")
+        } else if errorMessage.contains("doesn't support framebuffer access") {
+          throw GRPCStatus(code: .unimplemented, message: "Target doesn't support framebuffer access")
+        } else if errorMessage.contains("Failed to connect to framebuffer") {
+          throw GRPCStatus(code: .internalError, message: "Failed to connect to framebuffer")
+        } else if errorMessage.contains("Timeout waiting for IOSurface") {
+          throw GRPCStatus(code: .deadlineExceeded, message: "Timeout waiting for IOSurface to become available")
+        } else if errorMessage.contains("No IOSurface available") {
+          throw GRPCStatus(code: .unavailable, message: "No IOSurface currently available")
+        } else if errorMessage.contains("Invalid IOSurface") {
+          throw GRPCStatus(code: .dataLoss, message: "Invalid IOSurface properties")
+        } else {
+          // Generic error handling
+          throw GRPCStatus(code: .internalError, message: "IOSurface access failed: \(errorMessage)")
+        }
+      }
+    }
+  }
+
   func video_stream(requestStream: GRPCAsyncRequestStream<Idb_VideoStreamRequest>, responseStream: GRPCAsyncResponseStreamWriter<Idb_VideoStreamResponse>, context: GRPCAsyncServerCallContext) async throws {
     return try await FBTeardownContext.withAutocleanup {
       try await VideoStreamMethodHandler(target: target, targetLogger: targetLogger, commandExecutor: commandExecutor)

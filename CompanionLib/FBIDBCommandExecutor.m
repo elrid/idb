@@ -9,6 +9,38 @@
 
 #import <FBSimulatorControl/FBSimulatorControl.h>
 #import <FBDeviceControl/FBDeviceControl.h>
+#import <IOSurface/IOSurfaceObjC.h>
+#import <IOSurface/IOSurface.h>
+
+@interface FBSimpleFramebufferConsumer : NSObject <FBFramebufferConsumer>
+@property (nonatomic, copy) void (^surfaceHandler)(IOSurface *surface);
+- (instancetype)initWithSurfaceHandler:(void (^)(IOSurface *surface))surfaceHandler;
+@end
+
+@implementation FBSimpleFramebufferConsumer
+- (instancetype)initWithSurfaceHandler:(void (^)(IOSurface *surface))surfaceHandler
+{
+  self = [super init];
+  if (!self) {
+    return nil;
+  }
+  
+  _surfaceHandler = surfaceHandler;
+  return self;
+}
+
+- (void)didChangeIOSurface:(nullable IOSurface *)surface
+{
+  if (surface && self.surfaceHandler) {
+    self.surfaceHandler(surface);
+  }
+}
+
+- (void)didReceiveDamageRect:(CGRect)rect
+{
+  // Not needed for our use case
+}
+@end
 
 #import "FBXCTestDescriptor.h"
 #import "FBXCTestRunRequest.h"
@@ -144,6 +176,152 @@ FBFileContainerKind const FBFileContainerKindFramework = @"framework";
     screenshotCommands]
     onQueue:self.target.workQueue fmap:^(id<FBScreenshotCommands> commands) {
         return [commands takeScreenshot:format];
+    }];
+}
+
+- (FBFuture<NSDictionary<NSString *, id> *> *)get_main_screen_iosurface
+{
+  // Validate target type
+  if (![self.target isKindOfClass:[FBSimulator class]]) {
+    return [[FBIDBError
+      describeFormat:@"IOSurface access is only supported for simulator targets, got %@", NSStringFromClass([self.target class])]
+      failFuture];
+  }
+  
+  FBSimulator *simulator = (FBSimulator *)self.target;
+  
+  // Check simulator state
+  if (simulator.state != FBiOSTargetStateBooted) {
+    return [[FBIDBError
+      describeFormat:@"Simulator must be booted to access IOSurface, current state: %@", simulator.stateString]
+      failFuture];
+  }
+  
+  // Check if target supports framebuffer
+  if (![simulator respondsToSelector:@selector(connectToFramebuffer)]) {
+    return [[FBIDBError
+      describeFormat:@"Simulator %@ doesn't support framebuffer access", simulator]
+      failFuture];
+  }
+  
+  return [[simulator 
+    connectToFramebuffer]
+    onQueue:self.target.workQueue fmap:^(FBFramebuffer *framebuffer) {
+      // Validate framebuffer connection
+      if (!framebuffer) {
+        return [[FBIDBError
+          describeFormat:@"Failed to connect to framebuffer for simulator %@", simulator]
+          failFuture];
+      }
+      
+      // Create a temporary consumer to capture the IOSurface
+      dispatch_queue_t queue = dispatch_queue_create("com.facebook.idb.iosurface", DISPATCH_QUEUE_SERIAL);
+      __block IOSurface *capturedSurface = nil;
+      __block BOOL surfaceReceived = NO;
+      
+      // Create a simple consumer object that captures the surface
+      id<FBFramebufferConsumer> consumer = [[FBSimpleFramebufferConsumer alloc] 
+        initWithSurfaceHandler:^(IOSurface *surface) {
+          capturedSurface = surface;
+          surfaceReceived = YES;
+        }];
+      
+      // Try to get immediately available surface
+      IOSurface *immediatelyAvailableSurface = [framebuffer attachConsumer:consumer onQueue:queue];
+      
+      if (immediatelyAvailableSurface) {
+        capturedSurface = immediatelyAvailableSurface;
+        surfaceReceived = YES;
+      }
+      
+      // If no immediate surface, wait a short time for callback
+      if (!surfaceReceived) {
+        dispatch_time_t timeout = dispatch_time(DISPATCH_TIME_NOW, 2.0 * NSEC_PER_SEC);
+        dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+        
+        // Detach the current consumer first
+        [framebuffer detachConsumer:consumer];
+        
+        // Create a new consumer that signals when surface is received
+        consumer = [[FBSimpleFramebufferConsumer alloc] 
+          initWithSurfaceHandler:^(IOSurface *surface) {
+            capturedSurface = surface;
+            surfaceReceived = YES;
+            dispatch_semaphore_signal(semaphore);
+          }];
+        
+        // Attach the new consumer
+        [framebuffer attachConsumer:consumer onQueue:queue];
+        
+        // Wait for surface or timeout
+        if (dispatch_semaphore_wait(semaphore, timeout) != 0) {
+          [framebuffer detachConsumer:consumer];
+          return [[FBIDBError
+            describeFormat:@"Timeout waiting for IOSurface from framebuffer for simulator %@", simulator]
+            failFuture];
+        }
+      }
+      
+      // Detach the consumer
+      [framebuffer detachConsumer:consumer];
+      
+      // Validate surface availability
+      if (!capturedSurface) {
+        return [[FBIDBError
+          describeFormat:@"No IOSurface available from framebuffer for simulator %@", simulator]
+          failFuture];
+      }
+      
+      // Validate surface properties
+      if ([capturedSurface width] == 0 || [capturedSurface height] == 0) {
+        return [[FBIDBError
+          describeFormat:@"Invalid IOSurface dimensions: width=%zu, height=%zu", [capturedSurface width], [capturedSurface height]]
+          failFuture];
+      }
+      
+      // Get surface ID using the C API for compatibility with older macOS versions
+      uint32_t surfaceID = IOSurfaceGetID((__bridge IOSurfaceRef)capturedSurface);
+      
+      // Validate surface ID
+      if (surfaceID == 0) {
+        return [[FBIDBError
+          describe:@"Invalid IOSurface ID: surface ID is 0"]
+          failFuture];
+      }
+      
+      // Validate other surface properties
+      size_t bytesPerRow = [capturedSurface bytesPerRow];
+      size_t bytesPerElement = [capturedSurface bytesPerElement];
+      uint32_t pixelFormat = [capturedSurface pixelFormat];
+      
+      if (bytesPerRow == 0) {
+        return [[FBIDBError
+          describe:@"Invalid IOSurface bytes per row: 0"]
+          failFuture];
+      }
+      
+      if (bytesPerElement == 0) {
+        return [[FBIDBError
+          describe:@"Invalid IOSurface bytes per element: 0"]
+          failFuture];
+      }
+      
+      if (pixelFormat == 0) {
+        return [[FBIDBError
+          describe:@"Invalid IOSurface pixel format: 0"]
+          failFuture];
+      }
+      
+      NSDictionary<NSString *, id> *surfaceInfo = @{
+        @"surface_id": @(surfaceID),
+        @"width": @([capturedSurface width]),
+        @"height": @([capturedSurface height]),
+        @"bytes_per_row": @(bytesPerRow),
+        @"bytes_per_element": @(bytesPerElement),
+        @"pixel_format": @(pixelFormat)
+      };
+      
+      return [FBFuture futureWithResult:surfaceInfo];
     }];
 }
 
